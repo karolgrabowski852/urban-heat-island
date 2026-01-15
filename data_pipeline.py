@@ -35,9 +35,10 @@ class OSM:
 
         async with Fetcher() as f:
             bbox = await f.fetch_city_bbox(city=city, country=country, buffer_km=buffer_km)
-            # await f.download_osm_transit_stops(bbox, str(stops_path))
-            # await f.download_osm_walk_network(bbox, str(walk_path))
+            
+            await f.download_osm_transit_stops(bbox, str(stops_path))
+            await f.download_osm_walk_network(bbox, str(walk_path))
             await f.download_osm_buildings(bbox, str(buildings_path).replace("bdot", "osm"))
             # await f.download_bdl_population(Config.BDL_LUBLIN_UNIT, year, str(bdl_path))
 
-OSM().get_data(out_dir="data/lublin", city="Lublin", country="Polska", buffer_km=1.0)
+OSM().get_data(out_dir="data/puławy", city="Puławy", country="Polska", buffer_km=1.0)

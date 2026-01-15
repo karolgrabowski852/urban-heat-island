@@ -6,7 +6,7 @@ import json
 import math
 import httpx
 from config import Config
-
+from utils import fallback
 CHUNK_SIZE = 1024 * 1024
 
 
@@ -47,7 +47,12 @@ def _overpass_to_geojson(src: Path, dst: Path) -> None:
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     with dst.open("w", encoding="utf-8") as f:
-        json.dump({"type": "FeatureCollection", "features": features}, f)
+        geojson_out = {
+            "type": "FeatureCollection", 
+            "crs": { "type": "name", "properties": { "name": "EPSG:4326" } },
+            "features": features
+        }
+        json.dump(geojson_out, f)
 
 class Fetcher:
     def __init__(self, timeout: int = Config.DEFAULT_TIMEOUT):
@@ -61,7 +66,8 @@ class Fetcher:
 
         minlon, minlat, maxlon, maxlat = bbox
         return f"{minlat},{minlon},{maxlat},{maxlon}"
-
+    
+    @fallback()
     async def fetch_city_bbox(
         self,
         city: str,
@@ -110,6 +116,7 @@ class Fetcher:
     async def __aexit__(self, exc_type, exc, tb):
         await self.close()
 
+    @fallback()
     async def download_overpass(self, query: str, out_path: str) -> Path:
         payload = urlencode({"data": query}, doseq=False, encoding="utf-8")
         resp = await self.client.post(
@@ -124,7 +131,8 @@ class Fetcher:
         out = Path(out_path)
         await _stream_to_file_async(resp, out)
         return out
-
+    
+    @fallback()
     async def download_osm_transit_stops(
         self,
         bbox: Sequence[float],
@@ -145,18 +153,22 @@ out geom;
         await self.download_overpass(query, str(tmp))
         _overpass_to_geojson(tmp, Path(out_path))
         return Path(out_path)
-
+    
+    @fallback()
     async def download_osm_walk_network(
         self,
         bbox: Sequence[float],
         out_path: str,
     ) -> Path:
         swne = self._bbox_to_overpass(bbox)
+        # Force only ways, exclude areas/polygons which might be recognized as areas by OGR/ArcGIS
+        # Sometimes footways area defined as areas (parks etc), let's stick to lines.
+        # This query is fine, but _overpass_to_geojson might be mixing types if some ways are closed.
         query = f"""
 [out:json][timeout:120];
 (
-  way["highway"~"^(footway|path|pedestrian|living_street|residential|service|tertiary|secondary|primary)$"]({swne})["foot"!="no"];
-  way["highway"="cycleway"]({swne})["foot"!="no"];
+  way["highway"~"^(footway|path|pedestrian|living_street|residential|service|tertiary|secondary|primary)$"]({swne})["foot"!="no"]["area"!="yes"];
+  way["highway"="cycleway"]({swne})["foot"!="no"]["area"!="yes"];
   way["sidewalk"]({swne});
 );
 out geom;
@@ -165,7 +177,8 @@ out geom;
         await self.download_overpass(query, str(tmp))
         _overpass_to_geojson(tmp, Path(out_path))
         return Path(out_path)
-
+    
+    @fallback()
     async def download_osm_buildings(
         self,
         bbox: Sequence[float],
@@ -186,6 +199,7 @@ out geom;
         _overpass_to_geojson(tmp, Path(out_path))
         return Path(out_path)
 
+    @fallback()
     async def download_bdl_population(
         self,
         unit_id: str,
@@ -238,49 +252,3 @@ out geom;
                 ])
 
         return out
-
-    async def download_bdot_buildings(
-        self,
-        bbox: Sequence[float],
-        out_path: str,
-        type_name: str | None = None,
-        srs: str = "EPSG:4326",
-    ) -> Path:
-        """Pobiera budynki z BDOT10k (warstwa poligonowa)."""
-
-        layer = type_name or Config.BDOT10K_BUILDING_LAYER
-        return await self.download_bdot(layer, bbox, out_path, srs=srs, fmt="application/json")
-
-    async def download_bdot(
-        self,
-        type_name: str,
-        bbox: Sequence[float],
-        out_path: str,
-        srs: str = "EPSG:4326",
-        fmt: str = "application/json",
-    ) -> Path:
-        # BBOX wejściowy: [min_lon, min_lat, max_lon, max_lat]
-        bbox_lat_lon = f"{bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]}"
-        
-        params = {
-            "service": "WFS",
-            "request": "GetFeature",
-            "version": "2.0.0",
-            "typeNames": type_name,  # UWAGA: typeNames (liczba mnoga) dla WFS 2.0.0
-            "srsName": srs,
-            "bbox": f"{bbox_lat_lon},{srs}",
-            "outputFormat": fmt,
-            "count": 5000  # Ogranicz liczbę obiektów na jedno zapytanie
-        }
-        
-        # Używamy poprawnego endpointu EwidencjaObiektow
-        resp = await self.client.get(Config.GEO_BDOT10K_WFS, params=params)
-        
-        # Jeśli nadal masz 401, spróbuj usunąć parametry autoryzacji z nagłówków jeśli jakieś masz
-        resp.raise_for_status()
-        
-        out = Path(out_path)
-        await _stream_to_file_async(resp, out)
-        return out
-    
-
