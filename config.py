@@ -47,3 +47,6 @@ class Config:
     # TERC: ostatnia cyfra typu gminy; 2 = gmina wiejska (najczęściej)
     RURAL_GMINA_TERC_SUFFIXES = {"2"}
 
+    # Network Analyst (Service Area)
+    NETWORK_DATASET_PATH = os.getenv("NETWORK_DATASET_PATH")
+

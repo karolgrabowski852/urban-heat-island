@@ -1,6 +1,7 @@
 import arcpy
 from arcpy import sa
 from arcpy import management
+from arcpy import na
 import os
 import logging
 import json
@@ -133,6 +134,71 @@ class Workspace:
 
         management.Project(temp_fc, out_fc, sr)
         return out_fc
+
+    def build_network_dataset_from_walk(
+        self,
+        walk_geojson: str,
+        feature_dataset_name: str = "network_fd",
+        network_name: str = "walk_nd",
+        edge_fc_name: str = "walk_edges",
+    ) -> str:
+        """
+        Builds a basic Network Dataset from walk network lines.
+        Uses length-based impedance; cutoffs should be converted from minutes to meters.
+        """
+        if not arcpy.CheckExtension("Network"):
+            raise Exception("Network Analyst license required.")
+        arcpy.CheckOutExtension("Network")
+
+        try:
+            walk_fc = self.import_geojson(walk_geojson, "walk_net_lines")
+
+            fd_path = os.path.join(self.workspace, feature_dataset_name)
+            nd_path = os.path.join(fd_path, network_name)
+            edge_fc_path = os.path.join(fd_path, edge_fc_name)
+
+            if arcpy.Exists(nd_path):
+                try:
+                    arcpy.management.Delete(nd_path)
+                except Exception:
+                    pass
+
+            if arcpy.Exists(fd_path):
+                try:
+                    arcpy.management.Delete(fd_path)
+                except Exception:
+                    pass
+
+            if not arcpy.Exists(fd_path):
+                arcpy.management.CreateFeatureDataset(self.workspace, feature_dataset_name, self.sr_metric)
+
+            root_edge_fc = os.path.join(self.workspace, edge_fc_name)
+            if arcpy.Exists(root_edge_fc):
+                try:
+                    arcpy.management.Delete(root_edge_fc)
+                except Exception:
+                    pass
+
+            arcpy.conversion.FeatureClassToFeatureClass(walk_fc, fd_path, edge_fc_name)
+
+            # Add a walking time field (minutes) for reference
+            if "walk_time_min" not in [f.name for f in arcpy.ListFields(edge_fc_path)]:
+                arcpy.management.AddField(edge_fc_path, "walk_time_min", "DOUBLE")
+            meters_per_min = (self.walking_speed_kmh * 1000.0) / 60.0
+            arcpy.management.CalculateField(
+                edge_fc_path,
+                "walk_time_min",
+                f"!shape.length@meters! / {meters_per_min}",
+                "PYTHON3",
+            )
+
+            na.CreateNetworkDataset(fd_path, network_name, [edge_fc_name], "NO_ELEVATION")
+            na.BuildNetwork(nd_path)
+
+            return nd_path
+
+        finally:
+            arcpy.CheckInExtension("Network")
 
 
 
@@ -302,11 +368,152 @@ def classify(time_val):
         
         return centroids
 
+    def run_service_area(
+        self,
+        network_dataset: str,
+        stops_geojson: str,
+        boundary_geojson: str | None = None,
+        travel_mode: str | None = None,
+        cutoffs: list[float] | None = None,
+        output_polygons_name: str = "service_area_polygons",
+    ) -> str:
+        """
+        Runs Network Analyst Service Area to generate isochrone polygons.
+        - network_dataset: path to a network dataset or network data source
+        - stops_geojson: facilities (points)
+        - boundary_geojson: optional boundary to clip results
+        - travel_mode: optional travel mode name (e.g., "Walking Time")
+        - cutoffs: list of minute cutoffs (e.g., [5, 10, 15])
+        """
+        if not arcpy.CheckExtension("Network"):
+            raise Exception("Network Analyst license required.")
+        arcpy.CheckOutExtension("Network")
+
+        try:
+            stops_fc = self.import_geojson(stops_geojson, "stops_pts")
+
+            boundary_fc = None
+            if boundary_geojson:
+                boundary_fc = self.import_geojson(boundary_geojson, "boundary_mask", geometry_type_override="POLYGON")
+
+            if not cutoffs:
+                cutoffs = [5, 10, 15]
+
+            # Create Service Area layer
+            travel_mode_val = travel_mode if travel_mode else ""
+
+            sa_layer = na.MakeServiceAreaAnalysisLayer(
+                network_dataset,
+                "ServiceArea",
+                travel_mode_val,
+                "FROM_FACILITIES",
+                cutoffs,
+                None,
+                "LOCAL_TIME_AT_LOCATIONS",
+                "POLYGONS",
+                "STANDARD",
+                "DISSOLVE",
+                "RINGS",
+            )[0]
+
+            sublayers = na.GetNAClassNames(sa_layer)
+            facilities_layer = sublayers.get("Facilities")
+            polygons_layer = sublayers.get("SAPolygons")
+
+            na.AddLocations(
+                in_network_analysis_layer=sa_layer,
+                sub_layer=facilities_layer,
+                in_table=stops_fc,
+                search_tolerance="500 Meters",
+                append="CLEAR",
+            )
+
+            na.Solve(sa_layer)
+
+            out_polygons = os.path.join(self.workspace, output_polygons_name)
+            if arcpy.Exists(out_polygons):
+                arcpy.management.Delete(out_polygons)
+
+            arcpy.management.CopyFeatures(polygons_layer, out_polygons)
+
+            self.logger.info(f"Service Area complete. Result: {out_polygons}")
+            return out_polygons
+
+        except Exception as e:
+            self.logger.error(f"Service Area failed: {e}")
+            raise
+        finally:
+            arcpy.CheckInExtension("Network")
+
+    def calculate_building_access(self, buildings_geojson: str, service_area_polygons: str) -> str:
+        """
+        Calculates access to Service Area for residential buildings.
+        - Imports residential buildings
+        - Uses SpatialJoin to check if building intersects Service Area polygons
+        - Adds has_access field (1 = accessible, 0 = not accessible)
+        - Returns feature class with access information and percentage stats
+        """
+        self.logger.info("Calculating building access to Service Area...")
+
+        bldgs_fc = self.import_geojson(buildings_geojson, "buildings_polys", geometry_type_override="POLYGON")
+
+        # Filter residential buildings
+        res_layer = "res_layer"
+        if arcpy.Exists(res_layer):
+            arcpy.management.Delete(res_layer)
+        where_clause = "building IN ('apartments', 'house', 'residential', 'detached', 'semidetached_house', 'terrace', 'dormitory', 'yes')"
+        arcpy.management.MakeFeatureLayer(bldgs_fc, res_layer, where_clause)
+
+        res_count = int(arcpy.management.GetCount(res_layer).getOutput(0))
+        self.logger.info(f"Found {res_count} residential buildings.")
+
+        # Spatial Join: buildings to service area polygons (JOIN_ONE_TO_ONE with INTERSECT)
+        joined_fc = os.path.join(self.workspace, "buildings_with_access")
+        if arcpy.Exists(joined_fc):
+            arcpy.management.Delete(joined_fc)
+
+        arcpy.analysis.SpatialJoin(
+            target_features=res_layer,
+            join_features=service_area_polygons,
+            out_feature_class=joined_fc,
+            join_operation="JOIN_ONE_TO_ONE",
+            join_type="KEEP_ALL",
+            match_option="INTERSECT",
+        )
+
+        # Add has_access field: 1 if Join_Count > 0 (has ServiceArea polygon), else 0
+        if "has_access" not in [f.name for f in arcpy.ListFields(joined_fc)]:
+            arcpy.management.AddField(joined_fc, "has_access", "SHORT")
+
+        code_block = """
+def mark_access(join_count):
+    return 1 if join_count and join_count > 0 else 0
+"""
+        arcpy.management.CalculateField(
+            joined_fc,
+            "has_access",
+            "mark_access(!Join_Count!)",
+            "PYTHON3",
+            code_block,
+        )
+
+        # Calculate statistics
+        with arcpy.da.SearchCursor(joined_fc, ["has_access"]) as cursor:
+            access_count = sum(1 for row in cursor if row[0] == 1)
+
+        access_pct = (access_count / res_count * 100) if res_count > 0 else 0
+        self.logger.info(
+            f"Building access results: {access_count}/{res_count} buildings ({access_pct:.1f}%) have access to Service Area."
+        )
+
+        return joined_fc, access_pct
+
     def run_analysis(self, 
                      stops_geojson: str, 
                      walk_geojson: str, 
                      buildings_wfs_json: str, 
-                     boundary_mask_fc: str = None
+                     boundary_geojson: str | None = None,
+                     boundary_mask_fc: str | None = None
                      ):
         
         if not arcpy.CheckExtension("Spatial"):
@@ -318,10 +525,16 @@ def classify(time_val):
             walk_fc = self.import_geojson(walk_geojson, "walk_net_lines")
             blds_fc = self.import_geojson(buildings_wfs_json, "buildings_polys", geometry_type_override="POLYGON")
             
-            if not boundary_mask_fc:
+            boundary_fc = None
+            if boundary_mask_fc:
+                boundary_fc = boundary_mask_fc
+            elif boundary_geojson:
+                boundary_fc = self.import_geojson(boundary_geojson, "boundary_mask", geometry_type_override="POLYGON")
+
+            if not boundary_fc:
                 study_area = walk_fc # Fallback
             else:
-                study_area = boundary_mask_fc
+                study_area = boundary_fc
 
             imp_surf = self.create_impedance_raster(walk_fc, study_area)
             

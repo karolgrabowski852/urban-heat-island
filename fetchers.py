@@ -182,9 +182,6 @@ out geom;
         out_path: str,
     ) -> Path:
         swne = self._bbox_to_overpass(bbox)
-        # Force only ways, exclude areas/polygons which might be recognized as areas by OGR/ArcGIS
-        # Sometimes footways area defined as areas (parks etc), let's stick to lines.
-        # This query is fine, but _overpass_to_geojson might be mixing types if some ways are closed.
         query = f"""
 [out:json][timeout:120];
 (
@@ -265,7 +262,6 @@ out ids;
             if elements:
                 return int(elements[0]["id"])
 
-        # Try name:pl as last resort
         name_pl = ident.replace("Województwo ", "").replace("województwo ", "")
         query = f"""
 [out:json][timeout:120];
@@ -336,7 +332,6 @@ out geom;
 
 
 async def get_rural_gminas(self, voivodeship_terc: str = "28"):
-    # 1. Pobierz ID województwa
     v_id = await self.fetch_voivodeship_relation_id(voivodeship_terc)
     
     # 2. Pobierz wszystkie gminy
@@ -345,7 +340,6 @@ async def get_rural_gminas(self, voivodeship_terc: str = "28"):
     rural_gminas = []
     for g in all_gminas:
         terc = g["tags"].get("teryt:terc", "")
-        # Rodzaj 2 = gmina wiejska, Rodzaj 5 = obszar wiejski w miejsko-wiejskiej
         if terc.endswith("2") or terc.endswith("5"):
             rural_gminas.append(g)
             
