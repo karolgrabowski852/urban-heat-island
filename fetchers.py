@@ -45,6 +45,27 @@ def _overpass_to_geojson(src: Path, dst: Path) -> None:
             }
             features.append({"type": "Feature", "geometry": geom, "properties": tags})
 
+        elif el.get("type") == "relation" and "members" in el:
+            # Attempt to build polygons from relation members with geometry
+            outer_rings: list[list[list[float]]] = []
+            for member in el.get("members", []):
+                if member.get("type") != "way" or "geometry" not in member:
+                    continue
+                coords = [[pt["lon"], pt["lat"]] for pt in member["geometry"]]
+                if not coords:
+                    continue
+                if coords[0] != coords[-1]:
+                    coords.append(coords[0])
+                if member.get("role") == "outer":
+                    outer_rings.append(coords)
+
+            if outer_rings:
+                if len(outer_rings) == 1:
+                    geom = {"type": "Polygon", "coordinates": [outer_rings[0]]}
+                else:
+                    geom = {"type": "MultiPolygon", "coordinates": [[ring] for ring in outer_rings]}
+                features.append({"type": "Feature", "geometry": geom, "properties": tags})
+
     dst.parent.mkdir(parents=True, exist_ok=True)
     with dst.open("w", encoding="utf-8") as f:
         geojson_out = {
@@ -198,57 +219,134 @@ out geom;
         await self.download_overpass(query, str(tmp))
         _overpass_to_geojson(tmp, Path(out_path))
         return Path(out_path)
+    @fallback()
+    async def fetch_voivodeship_relation_id(self, identifier: str = "28") -> int:
+        """
+        Pobiera ID relacji województwa na podstawie kodu TERC (np. '28')
+        lub nazwy (np. 'Warmińsko-Mazurskie').
+        """
+        ident = (identifier or "").strip()
+        if ident.isdigit() and len(ident) <= 2:
+            query = f"""
+[out:json][timeout:60];
+relation["boundary"="administrative"]["admin_level"="4"]["teryt:terc"="{ident}"];
+out ids;
+"""
+            tmp = Path(f"data/tmp_voivodeship_{ident}.json")
+            await self.download_overpass(query, str(tmp))
+            with tmp.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            elements = data.get("elements", [])
+            if elements:
+                return int(elements[0]["id"])
+
+            raise ValueError(f"Nie znaleziono województwa o kodzie TERC: {ident}")
+
+        candidates = [ident]
+        if ident.lower().startswith("województwo "):
+            candidates.append(ident.replace("Województwo ", "", 1))
+            candidates.append(ident.replace("województwo ", "", 1))
+        if "warmińsko-mazurskie" in ident.lower() or "warminsko-mazurskie" in ident.lower():
+            candidates.append("Warmińsko-Mazurskie")
+            candidates.append("Warminsko-Mazurskie")
+
+        for candidate in candidates:
+            query = f"""
+[out:json][timeout:120];
+relation["boundary"="administrative"]["admin_level"="4"]["name"="{candidate}"];
+out ids;
+"""
+            tmp = Path(f"data/tmp_{candidate.replace(' ', '_')}_voivodeship.json")
+            await self.download_overpass(query, str(tmp))
+            with tmp.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            elements = data.get("elements", [])
+            if elements:
+                return int(elements[0]["id"])
+
+        # Try name:pl as last resort
+        name_pl = ident.replace("Województwo ", "").replace("województwo ", "")
+        query = f"""
+[out:json][timeout:120];
+relation["boundary"="administrative"]["admin_level"="4"]["name:pl"~"{name_pl}"];
+out ids;
+"""
+        tmp = Path(f"data/tmp_{ident.replace(' ', '_')}_voivodeship_pl.json")
+        await self.download_overpass(query, str(tmp))
+        with tmp.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        elements = data.get("elements", [])
+        if not elements:
+            raise ValueError(f"Nie znaleziono województwa: {identifier}")
+        return int(elements[0]["id"])
 
     @fallback()
-    async def download_bdl_population(
+    async def fetch_gminas_in_voivodeship(self, voivodeship_rel_id: int) -> list[dict]:
+        area_id = 3600000000 + voivodeship_rel_id
+        query = f"""
+[out:json][timeout:180];
+area({area_id})->.searchArea;
+relation["boundary"="administrative"]["admin_level"="7"](area.searchArea);
+out tags center bb;
+"""
+        tmp = Path(f"data/tmp_gminas_{voivodeship_rel_id}.json")
+        await self.download_overpass(query, str(tmp))
+        with tmp.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        gminas: list[dict] = []
+        for el in data.get("elements", []):
+            if el.get("type") != "relation":
+                continue
+            tags = el.get("tags", {})
+            bounds = el.get("bounds")
+            bbox = None
+            if bounds:
+                bbox = [
+                    float(bounds.get("minlon")),
+                    float(bounds.get("minlat")),
+                    float(bounds.get("maxlon")),
+                    float(bounds.get("maxlat")),
+                ]
+            gminas.append({
+                "id": int(el.get("id")),
+                "name": tags.get("name", ""),
+                "tags": tags,
+                "bbox": bbox,
+            })
+        return gminas
+
+    @fallback()
+    async def download_osm_relation_boundary(
         self,
-        unit_id: str,
-        year: int,
+        relation_id: int,
         out_path: str,
-        var_id: str = Config.BDL_POPULATION_VAR,
     ) -> Path:
-        async def _fetch(uid: str, y: int) -> httpx.Response:
-            params = {
-                "var-id": var_id,
-                "year": str(y),
-                "format": "json",
-            }
-            url = f"{Config.BDL_API_BASE}/data/by-unit/{uid.strip()}"
-            headers = {
-                "Accept": "application/json",
-                "X-ClientId": Config.BDL_CLIENT_ID,
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            }
-            return await self.client.get(url, params=params, headers=headers)
+        query = f"""
+[out:json][timeout:180];
+relation({relation_id});
+out geom;
+"""
+        tmp = Path(out_path).with_suffix(".osm.json")
+        await self.download_overpass(query, str(tmp))
+        _overpass_to_geojson(tmp, Path(out_path))
+        return Path(out_path)
 
-        years_to_try = [year, year - 1, year - 2]
-        resp: httpx.Response | None = None
-        for y_try in years_to_try:
-            candidate = await _fetch(unit_id, y_try)
-            resp = candidate
-            if candidate.status_code < 400:
-                year = y_try
-                break
 
-        if resp is None:
-            raise RuntimeError("No response from BDL")
 
-        resp.raise_for_status()
-        data = resp.json()
-        results = data.get("results", [])
-
-        out = Path(out_path)
-        _ensure_parent(out)
-        with out.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["unit_id", "var_id", "year", "val", "attr"])
-            for row in results:
-                writer.writerow([
-                    row.get("id"),
-                    row.get("variable"),
-                    row.get("year"),
-                    row.get("val"),
-                    row.get("attr_id"),
-                ])
-
-        return out
+async def get_rural_gminas(self, voivodeship_terc: str = "28"):
+    # 1. Pobierz ID województwa
+    v_id = await self.fetch_voivodeship_relation_id(voivodeship_terc)
+    
+    # 2. Pobierz wszystkie gminy
+    all_gminas = await self.fetch_gminas_in_voivodeship(v_id)
+    
+    rural_gminas = []
+    for g in all_gminas:
+        terc = g["tags"].get("teryt:terc", "")
+        # Rodzaj 2 = gmina wiejska, Rodzaj 5 = obszar wiejski w miejsko-wiejskiej
+        if terc.endswith("2") or terc.endswith("5"):
+            rural_gminas.append(g)
+            
+    return rural_gminas

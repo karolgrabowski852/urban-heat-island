@@ -39,3 +39,11 @@ class Config:
     DEFAULT_BUFFER_KM = 1.0
     BDOT10K_BUILDING_LAYER = "BDOT10k:BuildingA"  # można nadpisać jeśli Geoportal ma inną nazwę
 
+    # Administracyjne: województwo warmińsko-mazurskie (OSM)
+    WARMINSKO_MAZURSKIE_VOIVODESHIP = "Warmińsko-Mazurskie"
+    WARMINSKO_MAZURSKIE_TERC = "28"
+
+    # Filtr gmin wiejskich (OSM + TERYT)
+    # TERC: ostatnia cyfra typu gminy; 2 = gmina wiejska (najczęściej)
+    RURAL_GMINA_TERC_SUFFIXES = {"2"}
+

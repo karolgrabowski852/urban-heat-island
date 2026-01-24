@@ -134,7 +134,6 @@ class Workspace:
         management.Project(temp_fc, out_fc, sr)
         return out_fc
 
-class TransitAccessibilityModel(Workspace):
 
 
     def create_impedance_raster(self, walk_network_fc: str, study_area_mask: str) -> str:
