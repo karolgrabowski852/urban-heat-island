@@ -2,7 +2,9 @@
 import functools
 import logging
 from asyncio import sleep as aiotime_sleep
+
 logger = logging.getLogger(__name__)
+
 def fallback(max_retries=3, initial_delay=1, backoff_factor=2, exceptions=(Exception,)):
     def decorator(func):
         @functools.wraps(func)

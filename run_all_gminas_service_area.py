@@ -1,7 +1,7 @@
-import json
-import unicodedata
 import csv
+import json
 import logging
+import unicodedata
 
 from config import Config
 from transit_accessibility_analysis import ArcGisPipeline
@@ -21,9 +21,8 @@ if not logging.getLogger().handlers:
 def slugify(value: str) -> str:
     """Zwraca bezpieczny slug z nazwy gminy.
 
-    Funkcja normalizuje tekst Unicode do postaci ASCII, zastępuje znaki niealfanumeryczne
-    myślnikami i usuwa powtarzające się myślniki. Używana do mapowania nazw gmin na
-    nazwy katalogów i plików.
+    Normalizuje nazwę do ASCII, zastępuje znaki niealfanumeryczne myślnikami
+    i usuwa powtarzające się myślniki. Przydatne do tworzenia nazw katalogów.
     """
     norm = unicodedata.normalize("NFKD", value)
     ascii_text = "".join(c for c in norm if not unicodedata.combining(c))
@@ -33,23 +32,13 @@ def slugify(value: str) -> str:
     return safe.strip("-") or "gmina"
 
 
-def main() -> None:
-    """Wykonuje analizę dostępu do przystanków dla pierwszej gminy z indeksu.
+def process_gmina(model: ArcGisPipeline, gmina: dict) -> tuple[str, float]:
+    """Wykonuje pełną analizę dla pojedynczej gminy i zwraca wynik.
 
-    Funkcja wczytuje indeks gmin, przygotowuje ścieżki do plików danych dla pierwszej
-    gminy, buduje model analityczny (`ArcGisPipeline`) oraz uruchamia analizę obszaru obsługi
-    i oblicza procent budynków z dostępem do przystanku. Wynik zapisywany jest do CSV.
+    Funkcja przygotowuje ścieżki do plików wejściowych, sprawdza ich obecność,
+    buduje sieć pieszą i uruchamia analizę obszarów obsługi. Zwraca nazwę gminy
+    oraz procent budynków z dostępem do przystanku.
     """
-    if not INDEX_PATH.exists():
-        raise FileNotFoundError(f"Brak indeksu gmin: {INDEX_PATH}")
-
-    with INDEX_PATH.open("r", encoding="utf-8") as f:
-        index = json.load(f)
-
-    if not index:
-        raise ValueError("Indeks gmin jest pusty.")
-
-    gmina = index[0]
     name = gmina.get("name") or f"gmina_{gmina.get('id')}"
     g_dir = DATA_DIR / slugify(name)
 
@@ -63,8 +52,7 @@ def main() -> None:
             raise FileNotFoundError(f"Brak pliku: {p}")
 
     gdb_path = g_dir / "service_area.gdb"
-    model = ArcGisPipeline(workspace_gdb=str(gdb_path))
-
+    model.workspace_gdb = str(gdb_path)
 
     network_dataset = model.build_network_dataset_from_roads(str(road))
     meters_per_min = (model.walking_speed_kmh * 1000.0) / 60.0
@@ -84,13 +72,38 @@ def main() -> None:
         service_area_polygons=service_area_polygons,
     )
 
-    output_csv = OUTPUT_DIR / f"wynik_{slugify(name)}.csv"
+    return name, access_pct
+
+
+def main() -> None:
+    """Uruchamia analizę dla wszystkich gmin z indeksu i zapisuje podsumowanie.
+
+    Funkcja wczytuje listę gmin, iteruje po nich wywołując `process_gmina`, zapisuje
+    wyniki do zbiorczego pliku CSV i loguje postęp dla każdej gminy. Tworzy model
+    `ArcGisPipeline` z domyślnym geodatabase w katalogu wyjściowym.
+    """
+    if not INDEX_PATH.exists():
+        raise FileNotFoundError(f"Brak indeksu gmin: {INDEX_PATH}")
+
+    with INDEX_PATH.open("r", encoding="utf-8") as f:
+        index = json.load(f)
+
+    if not index:
+        raise ValueError("Indeks gmin jest pusty.")
+
+    output_csv = OUTPUT_DIR / "wyniki_wszystkie_gminy.csv"
+    model = ArcGisPipeline(workspace_gdb=str(OUTPUT_DIR / "service_area.gdb"))
+
     with output_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["gmina", "procent_dostępu_do_przystanku"])
-        writer.writerow([name, f"{access_pct:.2f}"])
+        writer.writerow(["gmina", "procent_dostepu_do_przystanku"])
 
-    logger.info("Wynik zapisany: %s", output_csv)
+        for gmina in index:
+            name, access_pct = process_gmina(model, gmina)
+            writer.writerow([name, f"{access_pct:.2f}"])
+            logger.info("Output: %s (%.2f%%)", name, access_pct)
+
+    logger.info("Saved: %s", output_csv)
 
 
 if __name__ == "__main__":

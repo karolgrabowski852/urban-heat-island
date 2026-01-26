@@ -209,3 +209,4 @@ data/
 transport_analysis.gdb/
 
 .github
+output/

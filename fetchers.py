@@ -75,6 +75,8 @@ def _overpass_to_geojson(src: Path, dst: Path) -> None:
         }
         json.dump(geojson_out, f)
 
+import requests
+requests.get()
 class Fetcher:
     def __init__(self, timeout: int = Config.DEFAULT_TIMEOUT):
         self.client = httpx.AsyncClient(
@@ -176,17 +178,17 @@ out geom;
         return Path(out_path)
     
     @fallback()
-    async def download_osm_walk_network(
+    async def download_osm_road_network(
         self,
         bbox: Sequence[float],
         out_path: str,
     ) -> Path:
+        """Download all road types from OSM: motorway, trunk, primary, secondary, tertiary, unclassified, residential, service, living_street, footway, path, pedestrian, cycleway, sidewalk."""
         swne = self._bbox_to_overpass(bbox)
         query = f"""
 [out:json][timeout:120];
 (
-  way["highway"~"^(footway|path|pedestrian|living_street|residential|service|tertiary|secondary|primary)$"]({swne})["foot"!="no"]["area"!="yes"];
-  way["highway"="cycleway"]({swne})["foot"!="no"]["area"!="yes"];
+  way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|living_street|footway|path|pedestrian|cycleway)$"]({swne})["area"!="yes"];
   way["sidewalk"]({swne});
 );
 out geom;
