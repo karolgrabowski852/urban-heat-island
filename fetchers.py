@@ -75,8 +75,7 @@ def _overpass_to_geojson(src: Path, dst: Path) -> None:
         }
         json.dump(geojson_out, f)
 
-import requests
-requests.get()
+
 class Fetcher:
     def __init__(self, timeout: int = Config.DEFAULT_TIMEOUT):
         self.client = httpx.AsyncClient(
