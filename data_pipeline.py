@@ -98,5 +98,3 @@ class OSM:
                 await f.download_osm_buildings(bbox, str(buildings_path))
                 await f.download_osm_relation_boundary(g.get("id"), str(boundary_path))
 
-if __name__ == "__main__":
-    OSM().get_rural_gminas_data(out_dir="data/warmia-mazury-rural")

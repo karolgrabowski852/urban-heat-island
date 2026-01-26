@@ -12,7 +12,6 @@ INDEX_PATH = DATA_DIR / "rural_gminas_index.json"
 OUTPUT_DIR = BASE_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# module logger
 logger = logging.getLogger(__name__)
 if not logging.getLogger().handlers:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -106,5 +105,3 @@ def main() -> None:
     logger.info("Saved: %s", output_csv)
 
 
-if __name__ == "__main__":
-    main()
